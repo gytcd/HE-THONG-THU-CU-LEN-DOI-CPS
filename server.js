@@ -1,15 +1,14 @@
-require('dotenv').config(); // 🌟 Luôn đặt trên cùng để nạp biến môi trường từ file .env
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { GoogleGenAI } = require('@google/genai'); // Sử dụng SDK chính thức mới của Google
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🌟 Hệ thống tự động nhận diện khóa bảo mật GEMINI_API_KEY từ file .env hoặc môi trường hosting
 const ai = new GoogleGenAI(); 
 
 const RENDER_BASE_URL = 'https://onrender.com';
@@ -26,12 +25,11 @@ function removeAccents(str) {
     return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D');
 }
 
-// BỘ LỌC TÊN MÁY: XÓA CHỮ APPLE / SAMSUNG / XIAOMI... VÀ DUNG LƯỢNG GB/TB
 function cleanPhoneName(phoneRaw) {
     if (!phoneRaw) return "";
     return phoneRaw
         .replace(/^(APPLE|SAMSUNG|XIAOMI|OPPO|VIVO|REALME|ASUS|GOOGLE)\s+/i, '')
-        .replace(/\s*\d+\s*(GB|TB)\$/i, '')
+        .replace(/\s*\d+\s*(GB|TB)$/i, '')
         .trim();
 }
 
@@ -59,14 +57,13 @@ function buildDtvCanonicalUrl(serviceLabel, rawPhoneName) {
     const serviceSlug = getDtvServiceSlug(serviceLabel);
     const cleanPhone = cleanPhoneName(rawPhoneName);
     const phoneSlug = removeAccents(cleanPhone).toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-');
-    return `https://dienthoaivui.com.vn${serviceSlug}-${phoneSlug}`;
+    return 'https://dienthoaivui.com.vn' + serviceSlug + '-' + phoneSlug;
 }
 
-// 1. API Tìm kiếm điện thoại & lấy giá Loại 1, 2, 3...
 app.get('/api/phones', async (req, res) => {
     try {
         const keyword = req.query.q || '';
-        const targetUrl = `${RENDER_BASE_URL}/api/search?q=${encodeURIComponent(keyword)}`;
+        const targetUrl = RENDER_BASE_URL + '/api/search?q=' + encodeURIComponent(keyword);
         const response = await axios.get(targetUrl);
         res.json(response.data.products || []);
     } catch (error) {
@@ -75,13 +72,12 @@ app.get('/api/phones', async (req, res) => {
     }
 });
 
-// 2. API Lấy bảng giá trừ tiền lỗi linh kiện theo tên máy
 app.get('/api/repairs', async (req, res) => {
     try {
         const productName = req.query.name;
         if (!productName) return res.status(400).json({ error: 'Thiếu tên sản phẩm' });
 
-        const targetUrl = `${RENDER_BASE_URL}/api/repair-prices?product_name=${encodeURIComponent(productName)}`;
+        const targetUrl = RENDER_BASE_URL + '/api/repair-prices?product_name=' + encodeURIComponent(productName);
         const response = await axios.get(targetUrl);
         res.json(response.data);
     } catch (error) {
@@ -90,32 +86,11 @@ app.get('/api/repairs', async (req, res) => {
     }
 });
 
-// 3. TRÍCH XUẤT GIÁ BẰNG GEMINI AI SDK MỚI
 async function askGeminiToExtractPrice(pageTextContent, serviceName, phoneName) {
     const isIphone = phoneName.toUpperCase().includes('IPHONE');
-    const prompt = `
-Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui.
-Hãy tìm GIÁ NIÊM YẾT GỐC (chưa giảm, chưa trừ Smember, chưa trừ voucher/chiết khấu) cho dịch vụ "${serviceName}" trên máy "${phoneName}".
-
-NỘI DUNG TRANG WEB:
-"""
-${pageTextContent.substring(0, 15000)}
-"""
-
-QUY TẮC ƯU TIÊN LINH KIỆN:
-1. Lấy giá gốc niêm yết của linh kiện chuẩn (chưa qua giảm giá).
-2. Quy tắc thương hiệu:
-   - Pin: ${isIphone ? 'Ưu tiên Dung lượng chuẩn Pisen > Dung lượng chuẩn Gen A/GenA > Dung lượng chuẩn Vmas > các dòng pin khác (chọn loại có giá thấp nhất).' : 'Ưu tiên linh kiện chuẩn chính hãng.'}
-   - Camera trước iPhone: Ưu tiên loại "Giữ Face ID".
-   - Camera sau iPhone: Ưu tiên loại "GEN A".
-   - Màn hình iPhone: Ưu tiên loại "MÀN GEN A PRO" (GEN A Pro).
-3. Trả về DUY NHẤT định dạng JSON thuần (KHÔNG DÙNG BLOCK MARKDOWN):
-{"rawPrice": <số nguyên giá gốc, VD: 840000>, "selectedBrand": "<tên linh kiện>"}
-Nếu không tìm thấy, trả về: {"rawPrice": 0, "selectedBrand": ""}
-`;
+    const prompt = 'Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui. Hãy tìm GIÁ NIÊM YẾT GỐC cho dịch vụ ' + serviceName + ' trên máy ' + phoneName + '. NỘI DUNG TRANG WEB: ' + pageTextContent.substring(0, 15000) + ' QUY TẮC ƯU TIÊN: Trả về duy nhất JSON thuần: {"rawPrice": <giá>, "selectedBrand": "<tên linh kiện>"}';
 
     try {
-        // Gọi API bằng SDK mới thế hệ hai của Google, tối ưu cho Auth Key (đầu mã AQ.)
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash', 
             contents: prompt,
@@ -130,7 +105,6 @@ Nếu không tìm thấy, trả về: {"rawPrice": 0, "selectedBrand": ""}
     }
 }
 
-// 4. API TRA GIÁ DTV BẰNG GEMINI API
 app.get('/api/get-dtv-price', async (req, res) => {
     const { service, phone } = req.query;
     if (!service || !phone) return res.status(400).json({ success: false, rawPrice: 0 });
@@ -139,16 +113,13 @@ app.get('/api/get-dtv-price', async (req, res) => {
     const dtvUrl = buildDtvCanonicalUrl(service, cleanPhone);
 
     try {
-        const { data: html } = await axios.get(dtvUrl, { headers: DTV_HEADERS, timeout: 8000 });
-        
-        // --- ĐOẠN ĐÃ SỬA SẠCH LỖI SYNTAX ---
-        const \(= cheerio.load(html);\)('script, style, svg, iframe, nav, footer').remove();
-        const pageText = \$('body').text().replace(/\s+/g, ' ').trim();
-        // ----------------------------------
+        const responseHtml = await axios.get(dtvUrl, { headers: DTV_HEADERS, timeout: 8000 });
+        const ch = cheerio.load(responseHtml.data);
+        ch('script, style, svg, iframe, nav, footer').remove();
+        const pageText = ch('body').text().replace(/\s+/g, ' ').trim();
 
-        // Kiểm tra rào cản Cloudflare chống bot
         if (pageText.includes('Cloudflare') || pageText.includes('Verify you are human') || pageText.length < 100) {
-            console.warn(`[CHẶN BOT] DTV chặn cào URL: ${dtvUrl}`);
+            console.warn('[CHẶN BOT] DTV chặn cào URL: ' + dtvUrl);
             return res.json({
                 success: false,
                 rawPrice: 0,
@@ -168,7 +139,7 @@ app.get('/api/get-dtv-price', async (req, res) => {
             });
         }
     } catch (error) {
-        console.error(`Lỗi cào URL ${dtvUrl}:`, error.message);
+        console.error('Lỗi cào URL ' + dtvUrl + ':', error.message);
     }
 
     return res.json({
@@ -181,5 +152,5 @@ app.get('/api/get-dtv-price', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server Backend AI đang chạy tại port: ${PORT}`);
+    console.log('Server Backend AI đang chạy tại port: ' + PORT);
 });
