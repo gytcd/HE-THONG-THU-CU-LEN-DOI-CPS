@@ -140,8 +140,11 @@ app.get('/api/get-dtv-price', async (req, res) => {
 
     try {
         const { data: html } = await axios.get(dtvUrl, { headers: DTV_HEADERS, timeout: 8000 });
+        
+        // --- ĐOẠN ĐÃ SỬA SẠCH LỖI SYNTAX ---
         const \(= cheerio.load(html);\)('script, style, svg, iframe, nav, footer').remove();
         const pageText = \$('body').text().replace(/\s+/g, ' ').trim();
+        // ----------------------------------
 
         // Kiểm tra rào cản Cloudflare chống bot
         if (pageText.includes('Cloudflare') || pageText.includes('Verify you are human') || pageText.length < 100) {
