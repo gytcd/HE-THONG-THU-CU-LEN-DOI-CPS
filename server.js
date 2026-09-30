@@ -11,7 +11,7 @@ app.use(express.json());
 
 const ai = new GoogleGenAI(); 
 
-const RENDER_BASE_URL = 'https://onrender.com';
+const RENDER_BASE_URL = 'https://tra-gia-nhap-cu.onrender.com';
 
 const DTV_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -57,18 +57,22 @@ function buildDtvCanonicalUrl(serviceLabel, rawPhoneName) {
     const serviceSlug = getDtvServiceSlug(serviceLabel);
     const cleanPhone = cleanPhoneName(rawPhoneName);
     const phoneSlug = removeAccents(cleanPhone).toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-');
-    return 'https://dienthoaivui.com.vn' + serviceSlug + '-' + phoneSlug;
+    return 'https://dienthoaivui.com.vn/' + serviceSlug + '-' + phoneSlug;
 }
 
 app.get('/api/phones', async (req, res) => {
     try {
         const keyword = req.query.q || '';
-        const targetUrl = RENDER_BASE_URL + '/api/search?q=' + encodeURIComponent(keyword);
-        const response = await axios.get(targetUrl);
+        // Loại bỏ tên hãng ở đầu câu tìm kiếm để gửi sang API Render
+        const cleanKeyword = keyword.replace(/^(APPLE|SAMSUNG|XIAOMI|OPPO|VIVO|REALME|ASUS|GOOGLE)\s+/i, '').trim();
+        const targetUrl = RENDER_BASE_URL + '/api/search?q=' + encodeURIComponent(cleanKeyword || keyword);
+        
+        // Thêm Timeout 15 giây tránh treo kết nối
+        const response = await axios.get(targetUrl, { timeout: 15000 });
         res.json(response.data.products || []);
     } catch (error) {
         console.error("Lỗi lấy danh sách điện thoại:", error.message);
-        res.status(500).json({ error: 'Không thể lấy dữ liệu điện thoại' });
+        res.status(500).json({ error: 'Không thể lấy dữ liệu điện thoại', message: error.message });
     }
 });
 
@@ -78,7 +82,7 @@ app.get('/api/repairs', async (req, res) => {
         if (!productName) return res.status(400).json({ error: 'Thiếu tên sản phẩm' });
 
         const targetUrl = RENDER_BASE_URL + '/api/repair-prices?product_name=' + encodeURIComponent(productName);
-        const response = await axios.get(targetUrl);
+        const response = await axios.get(targetUrl, { timeout: 15000 });
         res.json(response.data);
     } catch (error) {
         console.error("Lỗi lấy dữ liệu linh kiện:", error.message);
@@ -87,7 +91,6 @@ app.get('/api/repairs', async (req, res) => {
 });
 
 async function askGeminiToExtractPrice(pageTextContent, serviceName, phoneName) {
-    const isIphone = phoneName.toUpperCase().includes('IPHONE');
     const prompt = 'Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui. Hãy tìm GIÁ NIÊM YẾT GỐC cho dịch vụ ' + serviceName + ' trên máy ' + phoneName + '. NỘI DUNG TRANG WEB: ' + pageTextContent.substring(0, 15000) + ' QUY TẮC ƯU TIÊN: Trả về duy nhất JSON thuần: {"rawPrice": <giá>, "selectedBrand": "<tên linh kiện>"}';
 
     try {
@@ -119,7 +122,6 @@ app.get('/api/get-dtv-price', async (req, res) => {
         const pageText = ch('body').text().replace(/\s+/g, ' ').trim();
 
         if (pageText.includes('Cloudflare') || pageText.includes('Verify you are human') || pageText.length < 100) {
-            console.warn('[CHẶN BOT] DTV chặn cào URL: ' + dtvUrl);
             return res.json({
                 success: false,
                 rawPrice: 0,
