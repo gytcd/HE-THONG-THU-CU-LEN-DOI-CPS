@@ -30,7 +30,6 @@ function cleanPhoneName(phoneRaw) {
         .trim();
 }
 
-// Chuẩn hóa Slug URL chính xác theo Điện Thoại Vui
 function getDtvServiceSlug(label) {
     if (!label) return 'thay-linh-kien';
     const l = removeAccents(label).toLowerCase().trim();
@@ -51,63 +50,11 @@ function getDtvServiceSlug(label) {
     return 'thay-' + l.replace(/[^a-z0-9]/g, '-');
 }
 
-function buildDtvUrls(serviceLabel, rawPhoneName) {
+function buildDtvCanonicalUrl(serviceLabel, rawPhoneName) {
     const serviceSlug = getDtvServiceSlug(serviceLabel);
     const cleanPhone = cleanPhoneName(rawPhoneName);
     const phoneSlug = removeAccents(cleanPhone).toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-');
-    
-    const primary = `https://dienthoaivui.com.vn/${serviceSlug}-${phoneSlug}`;
-    
-    // Tạo URL dự phòng nếu trang bị 404 (ví dụ: sua-loi-face-id vs sua-face-id)
-    let fallback = null;
-    if (serviceSlug === 'sua-face-id') {
-        fallback = `https://dienthoaivui.com.vn/sua-loi-face-id-${phoneSlug}`;
-    } else if (serviceSlug === 'thay-cap-chan-sac') {
-        fallback = `https://dienthoaivui.com.vn/thay-chan-sac-${phoneSlug}`;
-    } else if (serviceSlug === 'thay-mat-kinh') {
-        fallback = `https://dienthoaivui.com.vn/ep-kinh-${phoneSlug}`;
-    }
-
-    return { primary, fallback };
-}
-
-// Bóc tách giá chính xác từ HTML/JSON-LD Điện Thoại Vui mà KHÔNG CẦN GEMINI AI
-function extractPriceFromHtml(html) {
-    const $ = cheerio.load(html);
-    
-    // 1. Thử bóc tách từ dữ liệu JSON-LD Schema
-    let exactPrice = 0;
-    $('script[type="application/ld+json"]').each((_, el) => {
-        try {
-            const data = JSON.parse($(el).html());
-            if (data.price) exactPrice = parseInt(data.price, 10);
-            if (!exactPrice && data.offers && data.offers.price) exactPrice = parseInt(data.offers.price, 10);
-            if (!exactPrice && Array.isArray(data) && data[0]?.offers?.price) exactPrice = parseInt(data[0].offers.price, 10);
-        } catch (e) {}
-    });
-
-    if (exactPrice > 0) return exactPrice;
-
-    // 2. Thử bóc tách từ class giá hiển thị trên giao diện DTV
-    const priceSelectors = ['.price-show', '.price-current', '.product-price', '.price', '.special-price'];
-    for (const selector of priceSelectors) {
-        const text = $(selector).first().text().replace(/[^\d]/g, '');
-        if (text) {
-            const parsed = parseInt(text, 10);
-            if (parsed >= 50000 && parsed <= 50000000) return parsed;
-        }
-    }
-
-    // 3. Fallback Regex tìm số tiền dạng xxx.xxx đ
-    $('script, style, iframe, nav, footer').remove();
-    const bodyText = $('body').text();
-    const match = bodyText.match(/(\d{1,3}(?:\.\d{3})+)\s*đ/);
-    if (match && match[1]) {
-        const parsed = parseInt(match[1].replace(/\./g, ''), 10);
-        if (parsed >= 50000 && parsed <= 50000000) return parsed;
-    }
-
-    return 0;
+    return 'https://dienthoaivui.com.vn/' + serviceSlug + '-' + phoneSlug;
 }
 
 app.get('/api/phones', async (req, res) => {
@@ -123,6 +70,7 @@ app.get('/api/phones', async (req, res) => {
     }
 });
 
+// LẤY LINH KIỆN TỪ RENDER API VÀ ĐÁNH DẤU CÓ GIÁ SẴN
 app.get('/api/repairs', async (req, res) => {
     try {
         const rawName = req.query.name || '';
@@ -144,8 +92,16 @@ app.get('/api/repairs', async (req, res) => {
             }
         }
 
-        if (response && response.data) {
-            return res.json(response.data);
+        if (response && response.data && response.data.items) {
+            const items = response.data.items.map(item => {
+                const p = parseFloat(item.raw_price || item.price || item.deduction || 0);
+                return {
+                    ...item,
+                    raw_price: p,
+                    isFromRender: p > 0 // Đánh dấu giá đến từ Render API
+                };
+            });
+            return res.json({ items });
         }
 
         res.json({ items: [] });
@@ -154,41 +110,58 @@ app.get('/api/repairs', async (req, res) => {
     }
 });
 
+// AI TRA GIÁ BÙ KHI RENDER API THIẾU GIÁ
+async function askGeminiToExtractPrice(pageTextContent, serviceName, phoneName) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return { rawPrice: 0, selectedBrand: "" };
+
+    const prompt = `Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui. Hãy tìm GIÁ NIÊM YẾT GỐC (số nguyên) cho dịch vụ ${serviceName} trên máy ${phoneName}.
+NỘI DUNG TRANG WEB: ${pageTextContent.substring(0, 12000)}
+Trả về duy nhất JSON: {"rawPrice": <số_tiền_nguyên>, "selectedBrand": "<tên_dịch_vụ>"}`;
+
+    try {
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+        const res = await axios.post(geminiUrl, {
+            contents: [{ parts: [{ text: prompt }] }]
+        }, { timeout: 10000 });
+
+        let resultText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        resultText = resultText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(resultText);
+        return { rawPrice: Number(parsed.rawPrice) || 0, selectedBrand: parsed.selectedBrand || serviceName };
+    } catch (e) {
+        return { rawPrice: 0, selectedBrand: "" };
+    }
+}
+
 app.get('/api/get-dtv-price', async (req, res) => {
     const { service, phone } = req.query;
     if (!service || !phone) return res.json({ success: false, rawPrice: 0 });
 
-    const { primary, fallback } = buildDtvUrls(service, phone);
-
-    let targetUrl = primary;
-    let responseHtml = null;
+    const cleanPhone = cleanPhoneName(phone);
+    const dtvUrl = buildDtvCanonicalUrl(service, cleanPhone);
 
     try {
-        responseHtml = await axios.get(primary, { headers: DTV_HEADERS, timeout: 7000 });
-    } catch (err) {
-        if (fallback) {
-            try {
-                targetUrl = fallback;
-                responseHtml = await axios.get(fallback, { headers: DTV_HEADERS, timeout: 7000 });
-            } catch (e) {}
-        }
-    }
+        const responseHtml = await axios.get(dtvUrl, { headers: DTV_HEADERS, timeout: 8000 });
+        const ch = cheerio.load(responseHtml.data);
+        ch('script, style, svg, iframe, nav, footer').remove();
+        const pageText = ch('body').text().replace(/\s+/g, ' ').trim();
 
-    if (responseHtml && responseHtml.data) {
-        const rawPrice = extractPriceFromHtml(responseHtml.data);
-        if (rawPrice > 0) {
-            return res.json({
-                success: true,
-                rawPrice: rawPrice,
-                url: targetUrl
-            });
+        if (!pageText.includes('Cloudflare') && pageText.length > 100) {
+            const extracted = await askGeminiToExtractPrice(pageText, service, cleanPhone);
+            if (extracted && extracted.rawPrice > 0) {
+                return res.json({
+                    success: true,
+                    url: dtvUrl,
+                    selectedBrand: extracted.selectedBrand || service,
+                    rawPrice: extracted.rawPrice
+                });
+            }
         }
-    }
+    } catch (error) {}
 
-    return res.json({ success: false, rawPrice: 0, url: targetUrl });
+    return res.json({ success: false, rawPrice: 0, url: dtvUrl });
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-    console.log('Server Backend AI đang chạy tại port: ' + PORT);
-});
+app.listen(PORT, () => console.log('Server Backend AI đang chạy tại port: ' + PORT));
