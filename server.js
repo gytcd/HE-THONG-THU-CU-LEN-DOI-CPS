@@ -3,13 +3,15 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const ai = new GoogleGenAI(); 
+// Khởi tạo Gemini SDK với API Key từ Environment Variable (chỉ khai báo 1 lần duy nhất)
+const apiKey = process.env.GEMINI_API_KEY || '';
+const ai = new GoogleGenAI({ apiKey });
 
 const RENDER_BASE_URL = 'https://tra-gia-nhap-cu.onrender.com';
 
@@ -74,7 +76,6 @@ app.get('/api/phones', async (req, res) => {
     }
 });
 
-// ĐÃ SỬA: Tự động lọc sạch tên sản phẩm & thử lại không chứa GB/TB nếu API Render rỗng
 app.get('/api/repairs', async (req, res) => {
     try {
         const rawName = req.query.name || '';
@@ -85,7 +86,6 @@ app.get('/api/repairs', async (req, res) => {
         
         let response = await axios.get(targetUrl, { timeout: 15000 }).catch(() => null);
 
-        // Thử lại nếu tên có dung lượng (ví dụ: iPhone 14 Pro 128GB -> iPhone 14 Pro)
         if (!response || !response.data || !response.data.items || response.data.items.length === 0) {
             const noStorageName = cleanName.replace(/\s*\d+\s*(GB|TB)$/i, '').trim();
             if (noStorageName && noStorageName !== cleanName) {
@@ -109,14 +109,14 @@ app.get('/api/repairs', async (req, res) => {
 });
 
 async function askGeminiToExtractPrice(pageTextContent, serviceName, phoneName) {
-    if (!process.env.GEMINI_API_KEY) {
-        console.error("⚠️️ Thiếu GEMINI_API_KEY trong môi trường!");
+    if (!apiKey) {
+        console.error("⚠ Chưa cấu hình GEMINI_API_KEY trên Render!");
         return { rawPrice: 0, selectedBrand: "" };
     }
 
     const prompt = `Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui. Hãy tìm GIÁ NIÊM YẾT GỐC cho dịch vụ ${serviceName} trên máy ${phoneName}. 
 NỘI DUNG TRANG WEB: ${pageTextContent.substring(0, 15000)}
-QUY TẮC: Trả về duy nhất JSON thuần dạng: {"rawPrice": <số_tiền_nguyên_dạng_number>, "selectedBrand": "<tên_dịch_vụ>"}`;
+QUY TẮC ƯU TIÊN: Trả về duy nhất JSON thuần: {"rawPrice": <giá_dạng_số>, "selectedBrand": "<tên_linh_kiện>"}`;
 
     try {
         const response = await ai.models.generateContent({
@@ -128,7 +128,7 @@ QUY TẮC: Trả về duy nhất JSON thuần dạng: {"rawPrice": <số_tiền_
         resultText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
         return JSON.parse(resultText);
     } catch (e) {
-        console.error("Lỗi Gemini SDK Call:", e.message);
+        console.error("Lỗi Gemini SDK:", e.message);
         return { rawPrice: 0, selectedBrand: "" };
     }
 }
@@ -177,7 +177,7 @@ app.get('/api/get-dtv-price', async (req, res) => {
     });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log('Server Backend AI đang chạy tại port: ' + PORT);
 });
