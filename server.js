@@ -3,15 +3,10 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Khởi tạo Gemini SDK với API Key từ Environment Variable (chỉ khai báo 1 lần duy nhất)
-const apiKey = process.env.GEMINI_API_KEY || '';
-const ai = new GoogleGenAI({ apiKey });
 
 const RENDER_BASE_URL = 'https://tra-gia-nhap-cu.onrender.com';
 
@@ -35,31 +30,84 @@ function cleanPhoneName(phoneRaw) {
         .trim();
 }
 
+// Chuẩn hóa Slug URL chính xác theo Điện Thoại Vui
 function getDtvServiceSlug(label) {
     if (!label) return 'thay-linh-kien';
     const l = removeAccents(label).toLowerCase().trim();
     
-    if (l.includes('face id') || l.includes('faceid')) return 'sua-loi-face-id';
+    if (l.includes('face id') || l.includes('faceid')) return 'sua-face-id';
     if (l.includes('man') || l.includes('man hinh')) return 'thay-man-hinh';
     if (l.includes('pin')) return 'thay-pin';
     if (l.includes('kinh lung') || l.includes('mat lung') || l.includes('nap lung')) return 'thay-kinh-lung';
     if (l.includes('cam ung') || l.includes('kinh cam ung')) return 'thay-kinh-cam-ung';
-    if (l.includes('ep kinh') || l.includes('mat kinh') || l.includes('kinh')) return 'ep-kinh';
+    if (l.includes('ep kinh') || l.includes('mat kinh') || l.includes('kinh')) return 'thay-mat-kinh';
     if (l.includes('vo')) return 'thay-vo';
     if (l.includes('cam sau') || l.includes('camera sau')) return 'thay-camera-sau';
     if (l.includes('cam truoc') || l.includes('camera truoc')) return 'thay-camera-truoc';
     if (l.includes('loa ngoai')) return 'thay-loa-ngoai';
     if (l.includes('loa trong')) return 'thay-loa-trong';
-    if (l.includes('chan sac') || l.includes('cap sac')) return 'thay-chan-sac';
+    if (l.includes('chan sac') || l.includes('cap sac')) return 'thay-cap-chan-sac';
     
     return 'thay-' + l.replace(/[^a-z0-9]/g, '-');
 }
 
-function buildDtvCanonicalUrl(serviceLabel, rawPhoneName) {
+function buildDtvUrls(serviceLabel, rawPhoneName) {
     const serviceSlug = getDtvServiceSlug(serviceLabel);
     const cleanPhone = cleanPhoneName(rawPhoneName);
     const phoneSlug = removeAccents(cleanPhone).toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-');
-    return 'https://dienthoaivui.com.vn/' + serviceSlug + '-' + phoneSlug;
+    
+    const primary = `https://dienthoaivui.com.vn/${serviceSlug}-${phoneSlug}`;
+    
+    // Tạo URL dự phòng nếu trang bị 404 (ví dụ: sua-loi-face-id vs sua-face-id)
+    let fallback = null;
+    if (serviceSlug === 'sua-face-id') {
+        fallback = `https://dienthoaivui.com.vn/sua-loi-face-id-${phoneSlug}`;
+    } else if (serviceSlug === 'thay-cap-chan-sac') {
+        fallback = `https://dienthoaivui.com.vn/thay-chan-sac-${phoneSlug}`;
+    } else if (serviceSlug === 'thay-mat-kinh') {
+        fallback = `https://dienthoaivui.com.vn/ep-kinh-${phoneSlug}`;
+    }
+
+    return { primary, fallback };
+}
+
+// Bóc tách giá chính xác từ HTML/JSON-LD Điện Thoại Vui mà KHÔNG CẦN GEMINI AI
+function extractPriceFromHtml(html) {
+    const $ = cheerio.load(html);
+    
+    // 1. Thử bóc tách từ dữ liệu JSON-LD Schema
+    let exactPrice = 0;
+    $('script[type="application/ld+json"]').each((_, el) => {
+        try {
+            const data = JSON.parse($(el).html());
+            if (data.price) exactPrice = parseInt(data.price, 10);
+            if (!exactPrice && data.offers && data.offers.price) exactPrice = parseInt(data.offers.price, 10);
+            if (!exactPrice && Array.isArray(data) && data[0]?.offers?.price) exactPrice = parseInt(data[0].offers.price, 10);
+        } catch (e) {}
+    });
+
+    if (exactPrice > 0) return exactPrice;
+
+    // 2. Thử bóc tách từ class giá hiển thị trên giao diện DTV
+    const priceSelectors = ['.price-show', '.price-current', '.product-price', '.price', '.special-price'];
+    for (const selector of priceSelectors) {
+        const text = $(selector).first().text().replace(/[^\d]/g, '');
+        if (text) {
+            const parsed = parseInt(text, 10);
+            if (parsed >= 50000 && parsed <= 50000000) return parsed;
+        }
+    }
+
+    // 3. Fallback Regex tìm số tiền dạng xxx.xxx đ
+    $('script, style, iframe, nav, footer').remove();
+    const bodyText = $('body').text();
+    const match = bodyText.match(/(\d{1,3}(?:\.\d{3})+)\s*đ/);
+    if (match && match[1]) {
+        const parsed = parseInt(match[1].replace(/\./g, ''), 10);
+        if (parsed >= 50000 && parsed <= 50000000) return parsed;
+    }
+
+    return 0;
 }
 
 app.get('/api/phones', async (req, res) => {
@@ -71,7 +119,6 @@ app.get('/api/phones', async (req, res) => {
         const response = await axios.get(targetUrl, { timeout: 15000 });
         res.json(response.data.products || []);
     } catch (error) {
-        console.error("Lỗi lấy danh sách điện thoại:", error.message);
         res.status(500).json({ error: 'Không thể lấy dữ liệu điện thoại', message: error.message });
     }
 });
@@ -103,78 +150,42 @@ app.get('/api/repairs', async (req, res) => {
 
         res.json({ items: [] });
     } catch (error) {
-        console.error("Lỗi lấy dữ liệu linh kiện:", error.message);
-        res.status(500).json({ error: 'Không thể lấy dữ liệu linh kiện' });
+        res.json({ items: [] });
     }
 });
 
-async function askGeminiToExtractPrice(pageTextContent, serviceName, phoneName) {
-    if (!apiKey) {
-        console.error("⚠ Chưa cấu hình GEMINI_API_KEY trên Render!");
-        return { rawPrice: 0, selectedBrand: "" };
-    }
-
-    const prompt = `Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui. Hãy tìm GIÁ NIÊM YẾT GỐC cho dịch vụ ${serviceName} trên máy ${phoneName}. 
-NỘI DUNG TRANG WEB: ${pageTextContent.substring(0, 15000)}
-QUY TẮC ƯU TIÊN: Trả về duy nhất JSON thuần: {"rawPrice": <giá_dạng_số>, "selectedBrand": "<tên_linh_kiện>"}`;
-
-    try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash', 
-            contents: prompt,
-        });
-
-        let resultText = response.text || '';
-        resultText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
-        return JSON.parse(resultText);
-    } catch (e) {
-        console.error("Lỗi Gemini SDK:", e.message);
-        return { rawPrice: 0, selectedBrand: "" };
-    }
-}
-
 app.get('/api/get-dtv-price', async (req, res) => {
     const { service, phone } = req.query;
-    if (!service || !phone) return res.status(400).json({ success: false, rawPrice: 0 });
+    if (!service || !phone) return res.json({ success: false, rawPrice: 0 });
 
-    const cleanPhone = cleanPhoneName(phone);
-    const dtvUrl = buildDtvCanonicalUrl(service, cleanPhone);
+    const { primary, fallback } = buildDtvUrls(service, phone);
+
+    let targetUrl = primary;
+    let responseHtml = null;
 
     try {
-        const responseHtml = await axios.get(dtvUrl, { headers: DTV_HEADERS, timeout: 8000 });
-        const ch = cheerio.load(responseHtml.data);
-        ch('script, style, svg, iframe, nav, footer').remove();
-        const pageText = ch('body').text().replace(/\s+/g, ' ').trim();
-
-        if (pageText.includes('Cloudflare') || pageText.includes('Verify you are human') || pageText.length < 100) {
-            return res.json({
-                success: false,
-                rawPrice: 0,
-                url: dtvUrl,
-                message: 'Bị rào cản Cloudflare chống bot chặn cào dữ liệu'
-            });
+        responseHtml = await axios.get(primary, { headers: DTV_HEADERS, timeout: 7000 });
+    } catch (err) {
+        if (fallback) {
+            try {
+                targetUrl = fallback;
+                responseHtml = await axios.get(fallback, { headers: DTV_HEADERS, timeout: 7000 });
+            } catch (e) {}
         }
-
-        const extracted = await askGeminiToExtractPrice(pageText, service, cleanPhone);
-
-        if (extracted && extracted.rawPrice > 0) {
-            return res.json({
-                success: true,
-                url: dtvUrl,
-                selectedBrand: extracted.selectedBrand || service,
-                rawPrice: extracted.rawPrice
-            });
-        }
-    } catch (error) {
-        console.error('Lỗi cào URL ' + dtvUrl + ':', error.message);
     }
 
-    return res.json({
-        success: false,
-        rawPrice: 0,
-        url: dtvUrl,
-        message: 'Không tìm thấy trang dịch vụ hoặc lỗi cào dữ liệu'
-    });
+    if (responseHtml && responseHtml.data) {
+        const rawPrice = extractPriceFromHtml(responseHtml.data);
+        if (rawPrice > 0) {
+            return res.json({
+                success: true,
+                rawPrice: rawPrice,
+                url: targetUrl
+            });
+        }
+    }
+
+    return res.json({ success: false, rawPrice: 0, url: targetUrl });
 });
 
 const PORT = process.env.PORT || 10000;
