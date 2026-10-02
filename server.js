@@ -63,11 +63,9 @@ function buildDtvCanonicalUrl(serviceLabel, rawPhoneName) {
 app.get('/api/phones', async (req, res) => {
     try {
         const keyword = req.query.q || '';
-        // Loại bỏ tên hãng ở đầu câu tìm kiếm để gửi sang API Render
         const cleanKeyword = keyword.replace(/^(APPLE|SAMSUNG|XIAOMI|OPPO|VIVO|REALME|ASUS|GOOGLE)\s+/i, '').trim();
         const targetUrl = RENDER_BASE_URL + '/api/search?q=' + encodeURIComponent(cleanKeyword || keyword);
         
-        // Thêm Timeout 15 giây tránh treo kết nối
         const response = await axios.get(targetUrl, { timeout: 15000 });
         res.json(response.data.products || []);
     } catch (error) {
@@ -76,14 +74,34 @@ app.get('/api/phones', async (req, res) => {
     }
 });
 
+// ĐÃ SỬA: Tự động lọc sạch tên sản phẩm & thử lại không chứa GB/TB nếu API Render rỗng
 app.get('/api/repairs', async (req, res) => {
     try {
-        const productName = req.query.name;
-        if (!productName) return res.status(400).json({ error: 'Thiếu tên sản phẩm' });
+        const rawName = req.query.name || '';
+        if (!rawName) return res.status(400).json({ error: 'Thiếu tên sản phẩm' });
 
-        const targetUrl = RENDER_BASE_URL + '/api/repair-prices?product_name=' + encodeURIComponent(productName);
-        const response = await axios.get(targetUrl, { timeout: 15000 });
-        res.json(response.data);
+        const cleanName = rawName.replace(/^(APPLE|SAMSUNG|XIAOMI|OPPO|VIVO|REALME|ASUS|GOOGLE)\s+/i, '').trim();
+        let targetUrl = RENDER_BASE_URL + '/api/repair-prices?product_name=' + encodeURIComponent(cleanName);
+        
+        let response = await axios.get(targetUrl, { timeout: 15000 }).catch(() => null);
+
+        // Thử lại nếu tên có dung lượng (ví dụ: iPhone 14 Pro 128GB -> iPhone 14 Pro)
+        if (!response || !response.data || !response.data.items || response.data.items.length === 0) {
+            const noStorageName = cleanName.replace(/\s*\d+\s*(GB|TB)$/i, '').trim();
+            if (noStorageName && noStorageName !== cleanName) {
+                targetUrl = RENDER_BASE_URL + '/api/repair-prices?product_name=' + encodeURIComponent(noStorageName);
+                const secondTry = await axios.get(targetUrl, { timeout: 15000 }).catch(() => null);
+                if (secondTry && secondTry.data && secondTry.data.items && secondTry.data.items.length > 0) {
+                    response = secondTry;
+                }
+            }
+        }
+
+        if (response && response.data) {
+            return res.json(response.data);
+        }
+
+        res.json({ items: [] });
     } catch (error) {
         console.error("Lỗi lấy dữ liệu linh kiện:", error.message);
         res.status(500).json({ error: 'Không thể lấy dữ liệu linh kiện' });
