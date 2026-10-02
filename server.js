@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { GoogleGenAI } = require('@google/genai');
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const app = express();
 app.use(cors());
@@ -109,7 +109,14 @@ app.get('/api/repairs', async (req, res) => {
 });
 
 async function askGeminiToExtractPrice(pageTextContent, serviceName, phoneName) {
-    const prompt = 'Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui. Hãy tìm GIÁ NIÊM YẾT GỐC cho dịch vụ ' + serviceName + ' trên máy ' + phoneName + '. NỘI DUNG TRANG WEB: ' + pageTextContent.substring(0, 15000) + ' QUY TẮC ƯU TIÊN: Trả về duy nhất JSON thuần: {"rawPrice": <giá>, "selectedBrand": "<tên linh kiện>"}';
+    if (!process.env.GEMINI_API_KEY) {
+        console.error("⚠️️ Thiếu GEMINI_API_KEY trong môi trường!");
+        return { rawPrice: 0, selectedBrand: "" };
+    }
+
+    const prompt = `Bạn là bộ phân tích bảng giá linh kiện Điện Thoại Vui. Hãy tìm GIÁ NIÊM YẾT GỐC cho dịch vụ ${serviceName} trên máy ${phoneName}. 
+NỘI DUNG TRANG WEB: ${pageTextContent.substring(0, 15000)}
+QUY TẮC: Trả về duy nhất JSON thuần dạng: {"rawPrice": <số_tiền_nguyên_dạng_number>, "selectedBrand": "<tên_dịch_vụ>"}`;
 
     try {
         const response = await ai.models.generateContent({
@@ -121,7 +128,7 @@ async function askGeminiToExtractPrice(pageTextContent, serviceName, phoneName) 
         resultText = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
         return JSON.parse(resultText);
     } catch (e) {
-        console.error("Lỗi Gemini SDK:", e.message);
+        console.error("Lỗi Gemini SDK Call:", e.message);
         return { rawPrice: 0, selectedBrand: "" };
     }
 }
